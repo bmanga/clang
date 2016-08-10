@@ -3373,7 +3373,7 @@ public:
   /// Determines whether this function prototype contains a
   /// parameter pack at the end.
   ///
-  /// A function template whose last parameter is a parameter pack can be
+  /// A function template whose one of parameters is a parameter pack can be
   /// called with an arbitrary number of arguments, much like a variadic
   /// function.
   bool isTemplateVariadic() const;

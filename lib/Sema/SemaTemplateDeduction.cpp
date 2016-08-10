@@ -3485,7 +3485,8 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
 
       continue;
     }
-
+#define ALLOW_NONTERMINAL_PARAM_PACKS
+#ifndef ALLOW_NONTERMINAL_PARAM_PACKS
     // C++0x [temp.deduct.call]p1:
     //   For a function parameter pack that occurs at the end of the
     //   parameter-declaration-list, the type A of each remaining argument of
@@ -3505,7 +3506,21 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
     bool HasAnyArguments = false;
     for (; ArgIdx < Args.size(); ++ArgIdx) {
       HasAnyArguments = true;
+#else
+	QualType ParamPattern = ParamExpansion->getPattern();
+	PackDeductionScope PackScope(*this, TemplateParams, Deduced, Info,
+		ParamPattern);
+	// The size of the pack is the number of arguments that are passed in 
+	// addition to the required ones.
+	// TODO: check that there are no default arguments after the pack
+	unsigned PackSize = Args.size() - Function->getMinRequiredArguments();
 
+	bool HasAnyArguments = false;
+	for (unsigned PackIdx = 0; 
+		 PackIdx < PackSize && ArgIdx < Args.size(); 
+		 ++PackIdx, ++ArgIdx) {
+		HasAnyArguments = true;
+#endif
       QualType OrigParamType = ParamPattern;
       ParamType = OrigParamType;
       Expr *Arg = Args[ArgIdx];
@@ -3555,8 +3570,13 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
     if (auto Result = PackScope.finish(HasAnyArguments))
       return Result;
 
+#ifndef ALLOW_NONTERMINAL_PARAM_PACKS
     // After we've matching against a parameter pack, we're done.
     break;
+#else
+	// We keep looping after a parameter pack to deduce the rest of the template
+	// arguments that may follow it.
+#endif
   }
 
   return FinishTemplateArgumentDeduction(FunctionTemplate, Deduced,
