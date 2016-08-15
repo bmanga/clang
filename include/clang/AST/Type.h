@@ -3371,12 +3371,13 @@ public:
   bool isVariadic() const { return Variadic; }
 
   /// Determines whether this function prototype contains a
-  /// parameter pack at the end.
+  /// parameter pack at the end. If Pos is specified, the index of the pack
+  /// is stored into Pos.
   ///
   /// A function template whose one of parameters is a parameter pack can be
   /// called with an arbitrary number of arguments, much like a variadic
   /// function.
-  bool isTemplateVariadic() const;
+  bool isTemplateVariadic(int* Pos = nullptr) const;
 
   bool hasTrailingReturn() const { return HasTrailingReturn; }
 

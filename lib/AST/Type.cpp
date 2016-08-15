@@ -2826,11 +2826,15 @@ bool FunctionProtoType::isNothrow(const ASTContext &Ctx,
   return NR == NR_Nothrow;
 }
 
-bool FunctionProtoType::isTemplateVariadic() const {
+bool FunctionProtoType::isTemplateVariadic(int* Pos) const {
   for (unsigned ArgIdx = getNumParams(); ArgIdx; --ArgIdx)
-    if (isa<PackExpansionType>(getParamType(ArgIdx - 1)))
+    if (isa<PackExpansionType>(getParamType(ArgIdx - 1))){
+	  if (Pos)
+		*Pos = ArgIdx - 1;
       return true;
-  
+	}
+
+  if (Pos) *Pos = -1;
   return false;
 }
 

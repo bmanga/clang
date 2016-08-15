@@ -784,6 +784,11 @@ private:
 };
 } // namespace
 
+/// \brief Harmonize the two template arguments in the presence of packs at
+/// different positions
+
+
+
 /// \brief Deduce the template arguments by comparing the list of parameter
 /// types to the list of argument types, as in the parameter-type-lists of
 /// function types (C++ [temp.deduct.type]p10).
@@ -864,13 +869,15 @@ DeduceTemplateArguments(Sema &S,
       ++ArgIdx;
       continue;
     }
-
+#define ALLOW_NONTERMINAL_PARAM_PACKS
+#ifndef ALLOW_NONTERMINAL_PARAM_PACKS
     // C++0x [temp.deduct.type]p5:
     //   The non-deduced contexts are:
     //     - A function parameter pack that does not occur at the end of the
     //       parameter-declaration-clause.
     if (ParamIdx + 1 < NumParams)
       return Sema::TDK_Success;
+#endif
 
     // C++0x [temp.deduct.type]p10:
     //   If the parameter-declaration corresponding to Pi is a function
@@ -3485,7 +3492,7 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
 
       continue;
     }
-#define ALLOW_NONTERMINAL_PARAM_PACKS
+
 #ifndef ALLOW_NONTERMINAL_PARAM_PACKS
     // C++0x [temp.deduct.call]p1:
     //   For a function parameter pack that occurs at the end of the
@@ -4249,6 +4256,109 @@ AddImplicitObjectParameterType(ASTContext &Context,
   ArgTypes.push_back(ArgTy);
 }
 
+static bool 
+HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
+										const FunctionProtoType* Proto1,
+										const FunctionProtoType* Proto2,
+										SmallVectorImpl<QualType>& Args1,
+										SmallVectorImpl<QualType>& Args2,
+										TemplateParameterList*& TemplateParams,
+										int NumCallArguments1)
+
+{
+	int NumArgs1 = Args1.size();
+	int NumArgs2 = Args2.size();
+	int ParamPackIdx1 = 0;
+	int ParamPackIdx2 = 0;
+	bool Variadic1 = Proto1->isTemplateVariadic(&ParamPackIdx1);
+	bool Variadic2 = Proto2->isTemplateVariadic(&ParamPackIdx2);
+
+	unsigned NumTemplateParams = TemplateParams->size();
+	// Substitute the parameter packs
+
+	if (Variadic1) {
+		// How many items does the pack have?
+		int PackSize = NumCallArguments1 - NumArgs1 + 1;
+		if (PackSize < 0) 
+			PackSize = 0;
+
+		// What type to substitute?
+		const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
+			(Args1[ParamPackIdx1]);
+		QualType Pattern = Expansion->getPattern();
+
+		// Remove the Pack
+		Args1.erase(Args1.begin() + ParamPackIdx1);
+
+		// Substiitute the parameter pack in the calling arguments
+		Args1.insert(Args1.begin() + ParamPackIdx1, PackSize, Pattern);
+	}
+
+	if (Variadic2) {
+		int PackSize = NumCallArguments1 - NumArgs2 + 1;
+
+		if (PackSize < 0)
+			PackSize = 0;
+
+		// FIXME: Add correct type
+		// Set up the container for the new template params
+		SmallVector<NamedDecl*, 2> NewTemplateParams;
+
+		// Copy the pre existing ones
+		for (NamedDecl* Existing : (*TemplateParams)) {
+			// Skip the template parameter pack
+			if (Existing->isTemplateParameterPack())
+				continue;
+			NewTemplateParams.push_back(Existing);
+		}
+
+		// Get the pattern of the pack
+		const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
+			(Args2[ParamPackIdx2]);
+		QualType Pattern = Expansion->getPattern();
+
+		// Remove the Pack
+		Args2.erase(Args2.begin() + ParamPackIdx2);
+
+		// Create the new, invented template parameters
+		for (; PackSize; --PackSize) {
+			// FIXME: pass sensible SourceLocation
+			TemplateTypeParmDecl *TemplParam =
+				TemplateTypeParmDecl::Create(Context, nullptr, SourceLocation(),
+					SourceLocation(), 0, NumTemplateParams + PackSize - 2, 
+					nullptr, false, false);
+
+			NewTemplateParams.push_back(TemplParam);
+
+			// Create a new function parameter depending on the pack pattern
+			QualType TemplateArg = QualType(TemplParam->getTypeForDecl(), 0);
+			QualType FuncParam = TemplateArg;
+			
+			if (const ReferenceType* Reference =
+				Pattern->getAs<ReferenceType>()) {
+				FuncParam = Context.getLValueReferenceType(TemplateArg);
+			}
+
+			else if (const PointerType* Pointer = 
+				Pattern->getAs<PointerType>()) {
+				FuncParam = Context.getPointerType(TemplateArg);
+			}
+			
+			Args2.insert(Args2.begin() + ParamPackIdx2,
+				FuncParam);
+		}
+
+		TemplateParameterList *NewTemplateParms = TemplateParameterList::Create(
+			Context, TemplateParams->getTemplateLoc(), TemplateParams->getLAngleLoc(),
+			NewTemplateParams, TemplateParams->getRAngleLoc(), nullptr);
+
+		TemplateParams = NewTemplateParms;
+
+	}
+
+	return true;
+}
+
 /// \brief Determine whether the function template \p FT1 is at least as
 /// specialized as \p FT2.
 static bool isAtLeastAsSpecializedAs(Sema &S,
@@ -4311,6 +4421,13 @@ static bool isAtLeastAsSpecializedAs(Sema &S,
                  Proto1->param_type_end());
     Args2.insert(Args2.end(), Proto2->param_type_begin(),
                  Proto2->param_type_end());
+
+	// Adjust the arguments to harmonize the two parameter lists in the presence
+	// of parameter packs
+	HarmonizeFunctionTemplateParameterLists(S.Context, Proto1, Proto2, Args1, Args2, 
+		TemplateParams, (int)NumCallArguments1);
+
+	Deduced.resize(TemplateParams->size());
 
     // C++ [temp.func.order]p5:
     //   The presence of unused ellipsis and default arguments has no effect on
