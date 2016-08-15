@@ -4273,7 +4273,6 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 	bool Variadic1 = Proto1->isTemplateVariadic(&ParamPackIdx1);
 	bool Variadic2 = Proto2->isTemplateVariadic(&ParamPackIdx2);
 
-	unsigned NumTemplateParams = TemplateParams->size();
 	// Substitute the parameter packs
 
 	if (Variadic1) {
@@ -4305,10 +4304,17 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 		SmallVector<NamedDecl*, 2> NewTemplateParams;
 
 		// Copy the pre existing ones
-		for (NamedDecl* Existing : (*TemplateParams)) {
-			// Skip the template parameter pack
-			if (Existing->isTemplateParameterPack())
-				continue;
+		for (unsigned Idx = 0; Idx < TemplateParams->size(); ++Idx) {
+			NamedDecl* Existing = TemplateParams->getParam(Idx);
+			// Replace the template parameter pack with a dummy template param
+			if (Existing->isTemplateParameterPack()) {
+				TemplateTypeParmDecl *UnusedTemplateParam =
+					TemplateTypeParmDecl::Create(Context, nullptr, 
+						SourceLocation(), SourceLocation(), 0, Idx, nullptr, 
+						false, false);
+				UnusedTemplateParam->setDefaultArgument(nullptr);
+				Existing = UnusedTemplateParam;
+			}
 			NewTemplateParams.push_back(Existing);
 		}
 
@@ -4320,12 +4326,14 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 		// Remove the Pack
 		Args2.erase(Args2.begin() + ParamPackIdx2);
 
+		unsigned NumTemplateParams = TemplateParams->size();
+
 		// Create the new, invented template parameters
 		for (; PackSize; --PackSize) {
 			// FIXME: pass sensible SourceLocation
 			TemplateTypeParmDecl *TemplParam =
 				TemplateTypeParmDecl::Create(Context, nullptr, SourceLocation(),
-					SourceLocation(), 0, NumTemplateParams + PackSize - 2, 
+					SourceLocation(), 0, NumTemplateParams + PackSize - 1, 
 					nullptr, false, false);
 
 			NewTemplateParams.push_back(TemplParam);
@@ -4514,21 +4522,22 @@ static bool isAtLeastAsSpecializedAs(Sema &S,
 }
 
 /// \brief Determine whether this a function template whose parameter-type-list
-/// ends with a function parameter pack.
+/// contains exactly one parameter pack
 static bool isVariadicFunctionTemplate(FunctionTemplateDecl *FunTmpl) {
   FunctionDecl *Function = FunTmpl->getTemplatedDecl();
   unsigned NumParams = Function->getNumParams();
   if (NumParams == 0)
     return false;
 
-  ParmVarDecl *Last = Function->getParamDecl(NumParams - 1);
-  if (!Last->isParameterPack())
-    return false;
+  bool HasParamPack = false;
 
-  // Make sure that no previous parameter is a parameter pack.
-  while (--NumParams > 0) {
-    if (Function->getParamDecl(NumParams - 1)->isParameterPack())
-      return false;
+  // Make sure that there is only one parameter pack
+  for (; NumParams; --NumParams) {
+	  if (Function->getParamDecl(NumParams - 1)->isParameterPack()) {
+		  if (HasParamPack)
+			  return false;
+		  HasParamPack = true;
+	}
   }
 
   return true;
