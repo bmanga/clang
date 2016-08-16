@@ -36,3 +36,7 @@ void foo (A a, Bs*... bs){
 
 foo (1, (int*)0); //calls second
 ```
+Update 16/08/16 12:23
+Now the template parameter pack can appear at any position.
+Fixed a bug where the function with the non terminal parameter pack would be chosen if two variadic template functions
+were as specialized as each other
