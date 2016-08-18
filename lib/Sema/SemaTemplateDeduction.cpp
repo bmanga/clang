@@ -4285,12 +4285,67 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 		const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
 			(Args1[ParamPackIdx1]);
 		QualType Pattern = Expansion->getPattern();
-
+		
 		// Remove the Pack
 		Args1.erase(Args1.begin() + ParamPackIdx1);
 
-		// Substiitute the parameter pack in the calling arguments
-		Args1.insert(Args1.begin() + ParamPackIdx1, PackSize, Pattern);
+		if (const TemplateSpecializationType *Specialization =
+			Pattern->getAs<TemplateSpecializationType>()) {
+			TemplateName Template = Specialization->getTemplateName();
+
+			ArrayRef<TemplateArgument> TemplateArgs =
+				Specialization->template_arguments();
+			SmallVector<TemplateArgument, 4> NewTemplateNameArguments(
+				TemplateArgs.begin(), TemplateArgs.end());
+
+			// Figure out which of the Template Arguments are unexpanded TPPs
+			SmallVector<unsigned char, 2> UnexpandedPackIndices;
+
+			for (unsigned I = 0; I < TemplateArgs.size(); ++I) {
+				TemplateArgument TA = TemplateArgs[I];
+				if (TA.containsUnexpandedParameterPack()) {
+					UnexpandedPackIndices.push_back(I);
+				}	
+			}
+
+			while (--PackSize) {
+				for (unsigned I : UnexpandedPackIndices) {
+					TemplateTypeParmDecl *TemplParam =
+						TemplateTypeParmDecl::Create(Context, nullptr,
+							SourceLocation(),
+							SourceLocation(), 0, 0,
+							nullptr, false, false);
+
+					// Create a Template Argument
+					QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
+					TemplateArgument TemplateArg(Arg);
+
+					//Substitute the unexpanded pack with the new Arg
+					NewTemplateNameArguments[I] = TemplateArg;
+				}
+				QualType TSTSubtitute =
+					Context.getTemplateSpecializationType(Template, 
+						NewTemplateNameArguments);
+
+				// Substiitute the parameter pack in the calling arguments
+				Args1.insert(Args1.begin() + ParamPackIdx1, TSTSubtitute);
+			}
+		}
+
+		// It is a Normal pack
+		else {
+			while (--PackSize) {
+				TemplateTypeParmDecl *TemplParam =
+					TemplateTypeParmDecl::Create(Context, nullptr,
+						SourceLocation(),
+						SourceLocation(), 0, 0,
+						nullptr, false, false);
+
+				// Create a Template Argument
+				QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
+				Args1.insert(Args1.begin() + ParamPackIdx1, Arg);
+			}
+		}
 	}
 
 	if (Variadic2) {
@@ -4307,6 +4362,7 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 		for (unsigned Idx = 0; Idx < TemplateParams->size(); ++Idx) {
 			NamedDecl* Existing = TemplateParams->getParam(Idx);
 			// Replace the template parameter pack with a dummy template param
+			//TODO: We may actually not need to do this
 			if (Existing->isTemplateParameterPack()) {
 				TemplateTypeParmDecl *UnusedTemplateParam =
 					TemplateTypeParmDecl::Create(Context, nullptr, 
