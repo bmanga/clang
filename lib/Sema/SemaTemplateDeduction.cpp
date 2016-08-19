@@ -4256,18 +4256,146 @@ AddImplicitObjectParameterType(ASTContext &Context,
   ArgTypes.push_back(ArgTy);
 }
 
+class TemplateSpecializationWithUPP
+{
+	SmallVector<unsigned, 2> UnexpandedPackIndices;
+	SmallVector<unsigned, 2> TemplateSpecializationIndices;
+	std::vector<TemplateSpecializationWithUPP> TemplateSpecializationTypes;
+
+	const TemplateSpecializationType *ThisType;
+public:
+	TemplateSpecializationWithUPP(const TemplateSpecializationType *TST) :
+		ThisType(TST){
+		TemplateName Template = TST->getTemplateName();
+
+		ArrayRef<TemplateArgument> TemplateArgs = TST->template_arguments();
+		
+		for (unsigned I = 0; I < TemplateArgs.size(); ++I) {
+			TemplateArgument TemplateArg = TemplateArgs[I];
+			if (TemplateArg.containsUnexpandedParameterPack()) {
+				if (const TemplateSpecializationType *Specialization =
+					TemplateArg.getAsType()->
+					getAs<TemplateSpecializationType>()) {
+					TemplateSpecializationIndices.push_back(I);
+					TemplateSpecializationTypes.emplace_back(Specialization);
+				}
+				else {
+					UnexpandedPackIndices.push_back(I);
+				}
+			}
+		}
+	}
+
+	QualType substitute(ASTContext &Ctx, QualType PackSubst){
+		ArrayRef<TemplateArgument> TemplateArgs =
+			ThisType->template_arguments();
+		SmallVector<TemplateArgument, 4> NewTNTemplateArgs(TemplateArgs.begin(),
+			TemplateArgs.end());
+
+		// Replace the Template Names
+		unsigned SubstituteCnt = 0;
+		for (auto&& ReplacedType : TemplateSpecializationTypes) {
+			unsigned TSIndex = TemplateSpecializationIndices[SubstituteCnt];
+			NewTNTemplateArgs[TSIndex] = ReplacedType.substitute(Ctx, PackSubst);
+			++SubstituteCnt;
+		}
+
+		// Replace every occurrence of the pack name with the new invented type
+		for (unsigned I : UnexpandedPackIndices)
+			NewTNTemplateArgs[I] = PackSubst;
+
+		return Ctx.getTemplateSpecializationType(ThisType->getTemplateName(),
+			NewTNTemplateArgs);
+	}
+};
+
+class ParamPackSubstHelper
+{
+
+
+
+};
+
+static bool SubstFunctionParameterPack(ASTContext &Context,
+	SmallVectorImpl<QualType> &Params,
+	SmallVectorImpl<NamedDecl*> *TemplateParams,
+	unsigned ParamPackSize,
+	unsigned ParamPackIdx,
+	unsigned NumCallArgs, 
+	unsigned NumTemplateParams)
+{
+	// Find the Pattern to be substituted
+	const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
+		(Params[ParamPackIdx]);
+	QualType Pattern = Expansion->getPattern();
+
+	//Remove the TPP
+	Params.erase(Params.begin() + ParamPackIdx);
+
+	// The parameter pack pattern is a Template Name that contains the 
+	// unexpanded template parameter pack. This could be nested
+	// template <class... Ts>
+	// void foo (std::vector<std::vector<Ts>>...)
+
+	if (const TemplateSpecializationType *Specialization =
+		Pattern->getAs<TemplateSpecializationType>()) {
+
+		while (ParamPackSize--) {
+			TemplateTypeParmDecl *TemplParam =
+				TemplateTypeParmDecl::Create(Context, nullptr,
+					SourceLocation(),
+					SourceLocation(), 0, NumTemplateParams + ParamPackSize - 1,
+					nullptr, false, false);
+
+			if (TemplateParams){
+				TemplateParams->push_back(TemplParam);
+			}
+			// Create a Template Argument
+			QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
+
+			TemplateSpecializationWithUPP TSResolver(Specialization);
+
+
+			// Substiitute the parameter pack in the calling arguments
+			Params.insert(Params.begin() + ParamPackIdx,
+				TSResolver.substitute(Context, Arg));
+		}
+	}
+	else {
+		while (ParamPackSize--) {
+			TemplateTypeParmDecl *TemplParam =
+				TemplateTypeParmDecl::Create(Context, nullptr,
+					SourceLocation(),
+					SourceLocation(), 0, 0,
+					nullptr, false, false);
+
+			// Create a Template Argument
+			QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
+			Params.insert(Params.begin() + ParamPackIdx, Arg);
+		}
+	}
+	return true;
+}
+
 static bool 
-HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
+SubstFunctionParameterPacksForPartialOrdering(ASTContext &Context,
 										const FunctionProtoType* Proto1,
 										const FunctionProtoType* Proto2,
 										SmallVectorImpl<QualType>& Args1,
 										SmallVectorImpl<QualType>& Args2,
 										TemplateParameterList*& TemplateParams,
-										int NumCallArguments1)
+										unsigned NumCallArguments1)
 
 {
+	//FIXME: Still ignoring pointers and references for Template Name 
+	// specializations
+	// eg
+	// template <class... Ts>
+	// void foo (std::vector<Ts>&... ts);
+	//                          ^
 	int NumArgs1 = Args1.size();
 	int NumArgs2 = Args2.size();
+	unsigned NumTemplateParams = TemplateParams->size();
 	int ParamPackIdx1 = 0;
 	int ParamPackIdx2 = 0;
 	bool Variadic1 = Proto1->isTemplateVariadic(&ParamPackIdx1);
@@ -4276,83 +4404,13 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 	// Substitute the parameter packs
 
 	if (Variadic1) {
-		// How many items does the pack have?
 		int PackSize = NumCallArguments1 - NumArgs1 + 1;
-		if (PackSize < 0) 
-			PackSize = 0;
-
-		// What type to substitute?
-		const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
-			(Args1[ParamPackIdx1]);
-		QualType Pattern = Expansion->getPattern();
-		
-		// Remove the Pack
-		Args1.erase(Args1.begin() + ParamPackIdx1);
-
-		if (const TemplateSpecializationType *Specialization =
-			Pattern->getAs<TemplateSpecializationType>()) {
-			TemplateName Template = Specialization->getTemplateName();
-
-			ArrayRef<TemplateArgument> TemplateArgs =
-				Specialization->template_arguments();
-			SmallVector<TemplateArgument, 4> NewTemplateNameArguments(
-				TemplateArgs.begin(), TemplateArgs.end());
-
-			// Figure out which of the Template Arguments are unexpanded TPPs
-			SmallVector<unsigned char, 2> UnexpandedPackIndices;
-
-			for (unsigned I = 0; I < TemplateArgs.size(); ++I) {
-				TemplateArgument TA = TemplateArgs[I];
-				if (TA.containsUnexpandedParameterPack()) {
-					UnexpandedPackIndices.push_back(I);
-				}	
-			}
-
-			while (--PackSize) {
-				for (unsigned I : UnexpandedPackIndices) {
-					TemplateTypeParmDecl *TemplParam =
-						TemplateTypeParmDecl::Create(Context, nullptr,
-							SourceLocation(),
-							SourceLocation(), 0, 0,
-							nullptr, false, false);
-
-					// Create a Template Argument
-					QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
-					TemplateArgument TemplateArg(Arg);
-
-					//Substitute the unexpanded pack with the new Arg
-					NewTemplateNameArguments[I] = TemplateArg;
-				}
-				QualType TSTSubtitute =
-					Context.getTemplateSpecializationType(Template, 
-						NewTemplateNameArguments);
-
-				// Substiitute the parameter pack in the calling arguments
-				Args1.insert(Args1.begin() + ParamPackIdx1, TSTSubtitute);
-			}
-		}
-
-		// It is a Normal pack
-		else {
-			while (--PackSize) {
-				TemplateTypeParmDecl *TemplParam =
-					TemplateTypeParmDecl::Create(Context, nullptr,
-						SourceLocation(),
-						SourceLocation(), 0, 0,
-						nullptr, false, false);
-
-				// Create a Template Argument
-				QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
-				Args1.insert(Args1.begin() + ParamPackIdx1, Arg);
-			}
-		}
+		SubstFunctionParameterPack(Context, Args1, nullptr, PackSize, 
+			ParamPackIdx1, NumCallArguments1, NumTemplateParams);
 	}
 
 	if (Variadic2) {
 		int PackSize = NumCallArguments1 - NumArgs2 + 1;
-
-		if (PackSize < 0)
-			PackSize = 0;
 
 		// FIXME: Add correct type
 		// Set up the container for the new template params
@@ -4365,59 +4423,24 @@ HarmonizeFunctionTemplateParameterLists(ASTContext &Context,
 			//TODO: We may actually not need to do this
 			if (Existing->isTemplateParameterPack()) {
 				TemplateTypeParmDecl *UnusedTemplateParam =
-					TemplateTypeParmDecl::Create(Context, nullptr, 
-						SourceLocation(), SourceLocation(), 0, Idx, nullptr, 
+					TemplateTypeParmDecl::Create(Context, nullptr,
+						SourceLocation(), SourceLocation(), 0, Idx, nullptr,
 						false, false);
 				UnusedTemplateParam->setDefaultArgument(nullptr);
 				Existing = UnusedTemplateParam;
 			}
 			NewTemplateParams.push_back(Existing);
 		}
-
-		// Get the pattern of the pack
-		const PackExpansionType *Expansion = dyn_cast<PackExpansionType>
-			(Args2[ParamPackIdx2]);
-		QualType Pattern = Expansion->getPattern();
-
-		// Remove the Pack
-		Args2.erase(Args2.begin() + ParamPackIdx2);
-
-		unsigned NumTemplateParams = TemplateParams->size();
-
-		// Create the new, invented template parameters
-		for (; PackSize; --PackSize) {
-			// FIXME: pass sensible SourceLocation
-			TemplateTypeParmDecl *TemplParam =
-				TemplateTypeParmDecl::Create(Context, nullptr, SourceLocation(),
-					SourceLocation(), 0, NumTemplateParams + PackSize - 1, 
-					nullptr, false, false);
-
-			NewTemplateParams.push_back(TemplParam);
-
-			// Create a new function parameter depending on the pack pattern
-			QualType TemplateArg = QualType(TemplParam->getTypeForDecl(), 0);
-			QualType FuncParam = TemplateArg;
-			
-			if (const ReferenceType* Reference =
-				Pattern->getAs<ReferenceType>()) {
-				FuncParam = Context.getLValueReferenceType(TemplateArg);
-			}
-
-			else if (const PointerType* Pointer = 
-				Pattern->getAs<PointerType>()) {
-				FuncParam = Context.getPointerType(TemplateArg);
-			}
-			
-			Args2.insert(Args2.begin() + ParamPackIdx2,
-				FuncParam);
-		}
+		SubstFunctionParameterPack(Context, Args2, &NewTemplateParams,
+			PackSize,
+			ParamPackIdx2, NumCallArguments1, NumTemplateParams);
 
 		TemplateParameterList *NewTemplateParms = TemplateParameterList::Create(
-			Context, TemplateParams->getTemplateLoc(), TemplateParams->getLAngleLoc(),
+			Context, TemplateParams->getTemplateLoc(),
+			TemplateParams->getLAngleLoc(),
 			NewTemplateParams, TemplateParams->getRAngleLoc(), nullptr);
 
 		TemplateParams = NewTemplateParms;
-
 	}
 
 	return true;
@@ -4488,8 +4511,8 @@ static bool isAtLeastAsSpecializedAs(Sema &S,
 
 	// Adjust the arguments to harmonize the two parameter lists in the presence
 	// of parameter packs
-	HarmonizeFunctionTemplateParameterLists(S.Context, Proto1, Proto2, Args1, Args2, 
-		TemplateParams, (int)NumCallArguments1);
+	SubstFunctionParameterPacksForPartialOrdering(S.Context, Proto1, Proto2, Args1, Args2, 
+		TemplateParams, NumCallArguments1);
 
 	Deduced.resize(TemplateParams->size());
 
