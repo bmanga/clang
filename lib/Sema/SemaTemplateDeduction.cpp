@@ -4332,48 +4332,31 @@ static bool SubstFunctionParameterPack(ASTContext &Context,
 	//Remove the TPP
 	Params.erase(Params.begin() + ParamPackIdx);
 
-	// The parameter pack pattern is a Template Name that contains the 
-	// unexpanded template parameter pack. This could be nested
-	// template <class... Ts>
-	// void foo (std::vector<std::vector<Ts>>...)
+	while (ParamPackSize--) {
+		TemplateTypeParmDecl *TemplParam =
+			TemplateTypeParmDecl::Create(Context, nullptr,
+				SourceLocation(),
+				SourceLocation(), 0, NumTemplateParams + ParamPackSize,
+				nullptr, false, false);
 
-	if (const TemplateSpecializationType *Specialization =
-		Pattern->getAs<TemplateSpecializationType>()) {
+		if (TemplateParams)
+			TemplateParams->push_back(TemplParam);
 
-		while (ParamPackSize--) {
-			TemplateTypeParmDecl *TemplParam =
-				TemplateTypeParmDecl::Create(Context, nullptr,
-					SourceLocation(),
-					SourceLocation(), 0, NumTemplateParams + ParamPackSize - 1,
-					nullptr, false, false);
+		QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
 
-			if (TemplateParams){
-				TemplateParams->push_back(TemplParam);
-			}
-			// Create a Template Argument
-			QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
-
+		// The parameter pack pattern is a Template Name that contains the 
+		// unexpanded template parameter pack. This could be nested
+		// template <class... Ts>
+		// void foo (std::vector<std::vector<Ts>>...)
+		if (const TemplateSpecializationType *Specialization =
+			Pattern->getAs<TemplateSpecializationType>()) {
 			TemplateSpecializationWithUPP TSResolver(Specialization);
-
-
-			// Substiitute the parameter pack in the calling arguments
-			Params.insert(Params.begin() + ParamPackIdx,
-				TSResolver.substitute(Context, Arg));
+			Arg = TSResolver.substitute(Context, Arg);
 		}
-	}
-	else {
-		while (ParamPackSize--) {
-			TemplateTypeParmDecl *TemplParam =
-				TemplateTypeParmDecl::Create(Context, nullptr,
-					SourceLocation(),
-					SourceLocation(), 0, 0,
-					nullptr, false, false);
 
-			// Create a Template Argument
-			QualType Arg = QualType(TemplParam->getTypeForDecl(), 0);
-			Params.insert(Params.begin() + ParamPackIdx, Arg);
-		}
+		Params.insert(Params.begin() + ParamPackIdx, Arg);
 	}
+
 	return true;
 }
 
