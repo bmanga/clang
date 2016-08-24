@@ -4649,6 +4649,18 @@ Sema::getMoreSpecializedTemplate(FunctionTemplateDecl *FT1,
   if (Variadic1 != Variadic2)
     return Variadic1? FT2 : FT1;
 
+  // If both are variadic function templates, pick the one with more required
+  // arguments
+  if (Variadic1 && Variadic2) {
+	  unsigned MinArgs1 = FT1->getTemplatedDecl()->getMinRequiredArguments();
+	  unsigned MinArgs2 = FT2->getTemplatedDecl()->getMinRequiredArguments();
+
+	  if (MinArgs1 == MinArgs2)
+		  return nullptr;
+
+	  return MinArgs1 > MinArgs2 ? FT1 : FT2;
+  }
+
   return nullptr;
 }
 
